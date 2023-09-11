@@ -51,7 +51,7 @@ def checkpoint_to_pipeline(
     target_dir: Optional[Path] = None,
     save: bool = True,
 ) -> StableDiffusionPipeline:
-    logger.debug(f"Converting checkpoint {path_from_cwd(checkpoint)}")
+    logger.debug(f"Converting checkpoint {(checkpoint)}")
     if target_dir is None:
         target_dir = pipeline_dir.joinpath(checkpoint.stem)
 
@@ -63,7 +63,7 @@ def checkpoint_to_pipeline(
     target_dir.mkdir(parents=True, exist_ok=True)
 
     if save:
-        logger.info(f"Saving pipeline to {path_from_cwd(target_dir)}")
+        logger.info(f"Saving pipeline to {(target_dir)}")
         pipeline.save_pretrained(target_dir, safe_serialization=True)
     return pipeline, target_dir
 

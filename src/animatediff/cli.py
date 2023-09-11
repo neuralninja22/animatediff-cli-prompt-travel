@@ -7,25 +7,22 @@ from typing import Annotated, Optional
 
 import torch
 import typer
-from diffusers.utils.logging import \
-    set_verbosity_error as set_diffusers_verbosity_error
+from diffusers.utils.logging import set_verbosity_error as set_diffusers_verbosity_error
 from rich.logging import RichHandler
 
+import re
+from PIL import Image
+from shutil import copyfile, rmtree
+import numpy as np
+
 from animatediff import __version__, console, get_dir
-from animatediff.generate import (controlnet_preprocess, create_pipeline,
-                                  create_us_pipeline, ip_adapter_preprocess,
-                                  load_controlnet_models, run_inference,
-                                  run_upscale, unload_controlnet_models)
+from animatediff.generate import controlnet_preprocess, create_pipeline, create_us_pipeline, ip_adapter_preprocess, load_controlnet_models, run_inference, run_upscale, unload_controlnet_models
 from animatediff.pipelines import AnimationPipeline, load_text_embeddings
-from animatediff.settings import (CKPT_EXTENSIONS, InferenceConfig,
-                                  ModelConfig, get_infer_config,
-                                  get_model_config)
+from animatediff.settings import CKPT_EXTENSIONS, InferenceConfig, ModelConfig, get_infer_config, get_model_config
 from animatediff.utils.civitai2config import generate_config_from_civitai_info
 from animatediff.utils.model import checkpoint_to_pipeline, get_base_model
 from animatediff.utils.pipeline import get_context_params, send_to_device
-from animatediff.utils.util import (extract_frames, is_v2_motion_module,
-                                    path_from_cwd, save_frames, save_imgs,
-                                    save_video)
+from animatediff.utils.util import extract_frames, is_v2_motion_module, path_from_cwd, save_frames, save_imgs, save_video
 from animatediff.utils.wild_card import replace_wild_card
 
 cli: typer.Typer = typer.Typer(
@@ -41,12 +38,14 @@ pipeline_dir = data_dir.joinpath("models/huggingface")
 
 try:
     import google.colab
+
     IN_COLAB = True
 except:
     IN_COLAB = False
 
 if IN_COLAB:
     import sys
+
     logging.basicConfig(
         level=logging.INFO,
         stream=sys.stdout,
@@ -80,8 +79,6 @@ except ImportError:
 from animatediff.stylize import stylize
 
 cli.add_typer(stylize, name="stylize")
-
-
 
 
 # mildly cursed globals to allow for reuse of the pipeline if we're being called as a module
@@ -202,9 +199,7 @@ def generate(
     ] = 1,
     device: Annotated[
         str,
-        typer.Option(
-            "--device", "-d", help="Device to run on (cpu, cuda, cuda:id)", rich_help_panel="Advanced"
-        ),
+        typer.Option("--device", "-d", help="Device to run on (cpu, cuda, cuda:id)", rich_help_panel="Advanced"),
     ] = "cuda",
     use_xformers: Annotated[
         bool,
@@ -256,6 +251,46 @@ def generate(
             rich_help_panel="Output",
         ),
     ] = False,
+    input_image: Annotated[
+        str,
+        typer.Option(
+            "--input-image",
+            "-I",
+            is_flag=True,
+            help="input png image",
+            rich_help_panel="Output",
+        ),
+    ] = None,
+    input_image_model: Annotated[
+        bool,
+        typer.Option(
+            "--input-image-model",
+            "-IM",
+            is_flag=False,
+            help="input image use model",
+            rich_help_panel="Output",
+        ),
+    ] = True,
+    input_image_fix: Annotated[
+        int,
+        typer.Option(
+            "--input-image-fix",
+            "-IF",
+            is_flag=False,
+            help="input png image fix",
+            rich_help_panel="Output",
+        ),
+    ] = 1,
+    input_image_flip: Annotated[
+        bool,
+        typer.Option(
+            "--input-image-flip",
+            "-IFL",
+            is_flag=True,
+            help="input png image flip",
+            rich_help_panel="Output",
+        ),
+    ] = False,
     version: Annotated[
         Optional[bool],
         typer.Option(
@@ -285,7 +320,7 @@ def generate(
     context, overlap, stride = get_context_params(length, context, overlap, stride)
 
     if (not is_v2) and (context > 24):
-        logger.warning( "For motion module v1, the maximum value of context is 24. Set to 24" )
+        logger.warning("For motion module v1, the maximum value of context is 24. Set to 24")
         context = 24
 
     # turn the device string into a torch.device
@@ -294,6 +329,123 @@ def generate(
     # Get the base model if we don't have it already
     logger.info(f"Using base model: {model_name_or_path}")
     base_model_path: Path = get_base_model(model_name_or_path, local_dir=get_dir("data/models/huggingface"))
+
+    # old prompt
+    for idx, prompt in enumerate(model_config.prompt):
+        model_config.prompt_map[f"{idx}"] = prompt
+
+    # input image
+    if input_image != None:
+        im = Image.open(input_image)
+        im.load()
+        if "parameters" in im.info:
+            prompt = ""
+            neg_prompt = ""
+            extra = ""
+            start_neg_prompt = False
+            parameters = im.info["parameters"]
+            for line in parameters.split("\n"):
+                if start_neg_prompt == True:
+                    if line.startswith("Steps:"):
+                        extra = line
+                        break
+                    else:
+                        neg_prompt = neg_prompt + line
+                else:
+                    if line.startswith("Negative prompt:"):
+                        start_neg_prompt = True
+                        neg_prompt = line[len("Negative prompt:") :]
+                    else:
+                        prompt = prompt + line
+
+            if prompt != "":
+                print(f"[prompt] {prompt}")
+                for index, p in model_config.prompt_map.items():
+                    model_config.prompt_map[index] = prompt + " " + p
+            if neg_prompt != "":
+                print(f"[neg_prompt] {neg_prompt}")
+                for index, p in enumerate(model_config.n_prompt):
+                    model_config.n_prompt[index] = neg_prompt + " " + p
+            if extra != "":
+                print(f"[extra] {extra}")
+                setting = dict()
+                x = extra.split(",")
+                for i in x:
+                    try:
+                        key = i[: i.index(":")]
+                        val = i[i.index(":") + 1 :]
+                        setting[str(key).strip()] = str(val).strip()
+                    except Exception as e:
+                        print("error", e)
+
+                if "Seed" in setting:
+                    for index, seed in enumerate(model_config.seed):
+                        model_config.seed[index] = int(float(setting["Seed"]))
+                        if model_config.seed[index] == -1:
+                            try:
+                                filename = os.path.splitext(os.path.basename(input_image))[0]
+                                fileseed = filename.split("-")[1]
+                                model_config.seed[index] = int(fileseed)
+                            except Exception as e:
+                                print("error", e)
+                if "Model" in setting and input_image_model:
+                    model_path = os.path.join(os.path.dirname(model_config.path), setting["Model"] + ".safetensors")
+                    print(f"{model_path=}")
+                    if os.path.exists(model_path):
+                        model_config.path = Path(model_path)
+
+        if os.path.basename(config_path).startswith("prompt_runtime"):
+            for key in model_config.controlnet_map:
+                if key.startswith("controlnet_"):
+                    if data_dir.joinpath(f"controlnet_image/runtime/{key}").is_dir():
+                        rmtree(data_dir.joinpath(f"controlnet_image/runtime/{key}"))
+                    if model_config.controlnet_map[key]["enable"]:
+                        if not data_dir.joinpath(f"controlnet_image/runtime/{key}").is_dir():
+                            data_dir.joinpath(f"controlnet_image/runtime/{key}").mkdir()
+
+                        if input_image_fix > 0:
+                            if input_image_flip:
+                                im_temp = im.transpose(Image.FLIP_LEFT_RIGHT)
+                                im_temp.save(data_dir.joinpath(f"controlnet_image/runtime/{key}/0000.png"))
+                            else:
+                                copyfile(input_image, data_dir.joinpath(f"controlnet_image/runtime/{key}/0000.png"))
+
+                            if key == "controlnet_openpose":
+                                if input_image_fix > 2:
+                                    if input_image_flip:
+                                        im_temp = im.transpose(Image.FLIP_LEFT_RIGHT)
+                                        im_temp.save(data_dir.joinpath(f"controlnet_image/runtime/{key}/0016.png"))
+                                    else:
+                                        copyfile(input_image, data_dir.joinpath(f"controlnet_image/runtime/{key}/0016.png"))
+                                elif input_image_fix > 1:
+                                    if input_image_flip:
+                                        im_temp = im.transpose(Image.FLIP_LEFT_RIGHT)
+                                        im_temp.save(data_dir.joinpath(f"controlnet_image/runtime/{key}/0008.png"))
+                                    else:
+                                        copyfile(input_image, data_dir.joinpath(f"controlnet_image/runtime/{key}/0008.png"))
+
+    # lora parsing
+    new_prompts = {}
+    lora_map = {}
+    for key, prompt in model_config.prompt_map.items():
+        items = re.findall(r"<lora:([^:]+):([0-9.]+)>", prompt)
+        for lora, weight in items:
+            lora_map[lora] = weight
+        prompt = re.sub(r"<lora:([^:]+):([0-9.]+)>", "", prompt)
+        new_prompts[key] = prompt
+    model_config.prompt_map = new_prompts
+
+    if model_config.lora_path != None:
+        lora_files = sorted(glob.glob(os.path.join(model_config.lora_path, "**", "*.safetensors"), recursive=True))
+        for lora_file in lora_files:
+            lora_filename = os.path.basename(lora_file)
+            lora_name = os.path.splitext(lora_filename)[0]
+            if lora_name in lora_map:
+                model_config.lora_map[lora_file] = float(lora_map[lora_name])
+
+    print(f"{model_config.seed=}")
+    print(f"{model_config.prompt_map=}")
+    print(f"{model_config.lora_map=}")
 
     # get a timestamp for the output directory
     time_str = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
@@ -327,9 +479,7 @@ def generate(
     if g_pipeline.device == device:
         logger.info("Pipeline already on the correct device, skipping device transfer")
     else:
-        g_pipeline = send_to_device(
-            g_pipeline, device, freeze=True, force_half=force_half_vae, compile=model_config.compile
-        )
+        g_pipeline = send_to_device(g_pipeline, device, freeze=True, force_half=force_half_vae, compile=model_config.compile)
 
     # save raw config to output directory
     save_config_path = save_dir.joinpath("raw_prompt.json")
@@ -391,7 +541,7 @@ def generate(
                     if model_config.tail_prompt:
                         pr = pr + "," + model_config.tail_prompt
 
-                    prompt_map[int(k)]=pr
+                    prompt_map[int(k)] = pr
 
             output = run_inference(
                 pipeline=g_pipeline,
@@ -416,7 +566,7 @@ def generate(
                 controlnet_ref_map=controlnet_ref_map,
                 no_frames=no_frames,
                 ip_adapter_map=ip_adapter_map,
-                output_map = model_config.output,
+                output_map=model_config.output,
             )
             outputs.append(output)
             torch.cuda.empty_cache()
@@ -425,7 +575,6 @@ def generate(
             gen_num += 1
 
     unload_controlnet_models(pipe=g_pipeline)
-
 
     logger.info("Generation complete!")
     if save_merged:
@@ -437,6 +586,7 @@ def generate(
     cli.info
 
     return save_dir
+
 
 @cli.command()
 def tile_upscale(
@@ -490,9 +640,7 @@ def tile_upscale(
     ] = -1,
     device: Annotated[
         str,
-        typer.Option(
-            "--device", "-d", help="Device to run on (cpu, cuda, cuda:id)", rich_help_panel="Advanced"
-        ),
+        typer.Option("--device", "-d", help="Device to run on (cpu, cuda, cuda:id)", rich_help_panel="Advanced"),
     ] = "cuda",
     use_xformers: Annotated[
         bool,
@@ -563,7 +711,6 @@ def tile_upscale(
     save_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Will save outputs to ./{path_from_cwd(save_dir)}")
 
-
     if "controlnet_tile" not in model_config.upscale_config:
         model_config.upscale_config["controlnet_tile"] = {
             "enable": True,
@@ -585,7 +732,7 @@ def tile_upscale(
         use_controlnet_ip2p = model_config.upscale_config["controlnet_ip2p"]["enable"] if "controlnet_ip2p" in model_config.upscale_config else False
 
     if use_controlnet_tile == False:
-        if use_controlnet_line_anime==False:
+        if use_controlnet_line_anime == False:
             if use_controlnet_ip2p == False:
                 raise ValueError(f"At least one of them should be enabled. {use_controlnet_tile=}, {use_controlnet_line_anime=}, {use_controlnet_ip2p=}")
 
@@ -600,17 +747,12 @@ def tile_upscale(
         use_controlnet_ip2p=use_controlnet_ip2p,
     )
 
-
     if us_pipeline.device == device:
         logger.info("Pipeline already on the correct device, skipping device transfer")
     else:
-        us_pipeline = send_to_device(
-            us_pipeline, device, freeze=True, force_half=force_half_vae, compile=model_config.compile
-        )
+        us_pipeline = send_to_device(us_pipeline, device, freeze=True, force_half=force_half_vae, compile=model_config.compile)
 
-
-    model_config.result = { "original_frames": str(frames_dir) }
-
+    model_config.result = {"original_frames": str(frames_dir)}
 
     # save config to output directory
     logger.info("Saving prompt config to output directory")
@@ -625,7 +767,7 @@ def tile_upscale(
 
     gen_num = 0  # global generation index
 
-    org_images = sorted(glob.glob( os.path.join(frames_dir, "[0-9]*.png"), recursive=False))
+    org_images = sorted(glob.glob(os.path.join(frames_dir, "[0-9]*.png"), recursive=False))
     length = len(org_images)
 
     if model_config.prompt_map:
@@ -650,10 +792,9 @@ def tile_upscale(
                 if model_config.tail_prompt:
                     pr = pr + "," + model_config.tail_prompt
 
-                prompt_map[int(k)]=pr
+                prompt_map[int(k)] = pr
 
         if model_config.upscale_config:
-
             upscaled_output = run_upscale(
                 org_imgs=org_images,
                 pipeline=us_pipeline,
@@ -687,6 +828,7 @@ def tile_upscale(
     cli.info
 
     return save_dir
+
 
 @cli.command()
 def civitai2config(
@@ -731,7 +873,7 @@ def civitai2config(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"Generate config files from: {lora_dir}")
-    generate_config_from_civitai_info(lora_dir,config_org,out_dir, lora_weight)
+    generate_config_from_civitai_info(lora_dir, config_org, out_dir, lora_weight)
     logger.info(f"saved at: {out_dir.absolute()}")
 
 
