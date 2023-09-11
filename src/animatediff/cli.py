@@ -397,6 +397,8 @@ def generate(
         if os.path.basename(config_path).startswith("prompt_runtime"):
             for key in model_config.controlnet_map:
                 if key.startswith("controlnet_"):
+                    if not data_dir.joinpath(f"controlnet_image/runtime").is_dir():
+                        data_dir.joinpath(f"controlnet_image/runtime").mkdir()
                     if data_dir.joinpath(f"controlnet_image/runtime/{key}").is_dir():
                         rmtree(data_dir.joinpath(f"controlnet_image/runtime/{key}"))
                     if model_config.controlnet_map[key]["enable"]:

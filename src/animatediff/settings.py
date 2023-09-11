@@ -115,6 +115,7 @@ class ModelConfig(BaseSettings):
     result: Dict[str, Any] = Field({})
     lora_path: Path = Field("models/lora")
     prompt: list[str] = Field([])
+    base: str = ""
 
     class Config(JsonConfig):
         json_config_path: Path
