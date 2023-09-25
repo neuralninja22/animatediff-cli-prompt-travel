@@ -39,7 +39,7 @@ def send_to_device(
     model_memory_format = get_memory_format(device)
 
     if hasattr(pipeline, "controlnet"):
-        unet_dtype = tenc_dtype = vae_dtype
+        # unet_dtype = tenc_dtype = vae_dtype
 
         logger.info(f"-> Selected data types: {unet_dtype=},{tenc_dtype=},{vae_dtype=}")
 
