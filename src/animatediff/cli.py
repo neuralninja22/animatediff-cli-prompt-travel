@@ -13,7 +13,7 @@ from rich.logging import RichHandler
 import re
 from PIL import Image
 from shutil import copyfile, rmtree
-import numpy as np
+from animatediff.schedulers import DiffusionScheduler
 
 from animatediff import __version__, console, get_dir
 from animatediff.generate import controlnet_preprocess, create_pipeline, create_us_pipeline, ip_adapter_preprocess, load_controlnet_models, run_inference, run_upscale, unload_controlnet_models
@@ -262,7 +262,7 @@ def generate(
         ),
     ] = None,
     input_image_model: Annotated[
-        bool,
+        str,
         typer.Option(
             "--input-image-model",
             "-IM",
@@ -270,7 +270,7 @@ def generate(
             help="input image use model",
             rich_help_panel="Output",
         ),
-    ] = True,
+    ] = None,
     input_image_fix: Annotated[
         int,
         typer.Option(
@@ -388,8 +388,32 @@ def generate(
                                 model_config.seed[index] = int(fileseed)
                             except Exception as e:
                                 print("error", e)
-                if "Model" in setting and input_image_model:
+                if "Sampler" in setting:
+                    sampler = setting["Sampler"]
+                    if sampler == "Euler a":
+                        model_config.scheduler = DiffusionScheduler.euler_a
+                    elif sampler == "DDIM":
+                        model_config.scheduler = DiffusionScheduler.ddim
+                    elif sampler == "PNDM":
+                        model_config.scheduler = DiffusionScheduler.pndm
+                    elif sampler == "UniPC":
+                        model_config.scheduler = DiffusionScheduler.unipc
+                    elif sampler == "LMS Karras":
+                        model_config.scheduler = DiffusionScheduler.k_lms
+                    elif sampler == "DPM++ 2M Karras":
+                        model_config.scheduler = DiffusionScheduler.k_dpmpp_2m
+                    elif sampler == "DPM++ SDE Karras":
+                        model_config.scheduler = DiffusionScheduler.k_dpmpp_sde
+                    elif sampler == "DPM++ 2M SDE Karras":
+                        model_config.scheduler = DiffusionScheduler.k_dpmpp_2m_sde
+
+                if "Model" in setting:
                     model_path = os.path.join(os.path.dirname(model_config.path), setting["Model"] + ".safetensors")
+                    print(f"{model_path=}")
+                    if os.path.exists(model_path):
+                        model_config.path = Path(model_path)
+                if input_image_model != None:
+                    model_path = os.path.join(os.path.dirname(model_config.path), input_image_model + ".safetensors")
                     print(f"{model_path=}")
                     if os.path.exists(model_path):
                         model_config.path = Path(model_path)
@@ -448,6 +472,7 @@ def generate(
     print(f"{model_config.seed=}")
     print(f"{model_config.prompt_map=}")
     print(f"{model_config.lora_map=}")
+    print(f"{model_config.scheduler=}")
 
     # get a timestamp for the output directory
     time_str = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
@@ -455,6 +480,9 @@ def generate(
     save_dir = out_dir.joinpath(f"{time_str}-{model_config.save_name}")
     save_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Will save outputs to ./{path_from_cwd(save_dir)}")
+
+    if input_image != None:
+        copyfile(input_image, save_dir.joinpath(f"input_image.png"))
 
     controlnet_image_map, controlnet_type_map, controlnet_ref_map = controlnet_preprocess(model_config.controlnet_map, width, height, length, save_dir, device)
     ip_adapter_map = ip_adapter_preprocess(model_config.ip_adapter_map, width, height, length, save_dir)
